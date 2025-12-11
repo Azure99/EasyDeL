@@ -952,7 +952,6 @@ class eSurgeRunner:
             page_table_cpu = self.sequence_buffer.page_table[0].get_cpu_tensor()
             step_start = time.time()
             (
-                minimal_device_state,
                 out_tokens_win,
                 valid_mask_win,
                 self.input_ids_buf,
@@ -987,10 +986,6 @@ class eSurgeRunner:
             # Clear vision data after prefill to free memory
             for req_state in vision_request_states:
                 req_state.clear_vision_data()
-
-            # Start async copy to host (non-blocking) - overlaps with post-processing
-            token_ids_async = jax.copy_to_host_async(minimal_device_state.token_ids)
-            num_tokens_async = jax.copy_to_host_async(minimal_device_state.num_tokens)
 
             # account for device time (blocking already happened inside execute())
             total_step_time += time.time() - step_start
@@ -1042,18 +1037,22 @@ class eSurgeRunner:
             up_wtime_took = time.time() - up_wtime
             total_post_proc_time += up_wtime_took
 
-            # Complete async sync-back (should be done by now, overlapped with post-processing)
-            sq_utime = time.time()
-            token_ids_updated = np.asarray(token_ids_async)
-            num_tokens_updated = np.asarray(num_tokens_async)
-            if not token_ids_updated.flags.writeable:
-                token_ids_updated = token_ids_updated.copy()
-            if not num_tokens_updated.flags.writeable:
-                num_tokens_updated = num_tokens_updated.copy()
-            self.sequence_buffer.token_ids = token_ids_updated
-            self.sequence_buffer.num_computed_tokens = num_tokens_updated
-            sq_utime_took = time.time() - sq_utime
-            total_sync_time += sq_utime_took
+            # Update CPU-side buffer directly (avoids full token buffer round-trip)
+            update_start = time.time()
+            for local_idx, rid in enumerate(req_ids_window):
+                if rid is None or not valid_np[local_idx]:
+                    continue
+                buf_idx = start_index + local_idx
+                pos = int(self.sequence_buffer.num_computed_tokens[buf_idx])
+                if pos < self.max_model_len:
+                    self.sequence_buffer.token_ids[buf_idx, pos] = int(tokens_np[local_idx])
+                    new_len = pos + 1
+                    self.sequence_buffer.num_computed_tokens[buf_idx] = new_len
+                    self.sequence_buffer.num_tokens[buf_idx] = max(self.sequence_buffer.num_tokens[buf_idx], new_len)
+                    self.sequence_buffer.num_tokens_no_spec[buf_idx] = max(
+                        self.sequence_buffer.num_tokens_no_spec[buf_idx], new_len
+                    )
+            total_sync_time += time.time() - update_start
 
             start_index = end_index
 
