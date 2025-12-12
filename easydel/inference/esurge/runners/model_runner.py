@@ -1037,20 +1037,25 @@ class eSurgeRunner:
             up_wtime_took = time.time() - up_wtime
             total_post_proc_time += up_wtime_took
 
-            # Update CPU-side buffer directly (avoids full token buffer round-trip)
+            # Vectorized CPU-side buffer update (avoids per-request Python loop)
             update_start = time.time()
-            for local_idx, rid in enumerate(req_ids_window):
-                if rid is None or not valid_np[local_idx]:
-                    continue
-                buf_idx = start_index + local_idx
-                pos = int(self.sequence_buffer.num_computed_tokens[buf_idx])
-                if pos < self.max_model_len:
-                    self.sequence_buffer.token_ids[buf_idx, pos] = int(tokens_np[local_idx])
-                    new_len = pos + 1
-                    self.sequence_buffer.num_computed_tokens[buf_idx] = new_len
-                    self.sequence_buffer.num_tokens[buf_idx] = max(self.sequence_buffer.num_tokens[buf_idx], new_len)
-                    self.sequence_buffer.num_tokens_no_spec[buf_idx] = max(
-                        self.sequence_buffer.num_tokens_no_spec[buf_idx], new_len
+            valid_indices = [i for i, rid in enumerate(req_ids_window) if rid is not None and valid_np[i]]
+            if valid_indices:
+                buf_indices = np.array(valid_indices, dtype=np.int64) + start_index
+                positions = self.sequence_buffer.num_computed_tokens[buf_indices]
+                within_limit = positions < self.max_model_len
+                if np.any(within_limit):
+                    buf_indices = buf_indices[within_limit]
+                    positions = positions[within_limit]
+                    toks = tokens_np[np.array(valid_indices, dtype=np.int64)[within_limit]]
+                    self.sequence_buffer.token_ids[buf_indices, positions] = toks
+                    new_len = positions + 1
+                    self.sequence_buffer.num_computed_tokens[buf_indices] = new_len
+                    self.sequence_buffer.num_tokens[buf_indices] = np.maximum(
+                        self.sequence_buffer.num_tokens[buf_indices], new_len
+                    )
+                    self.sequence_buffer.num_tokens_no_spec[buf_indices] = np.maximum(
+                        self.sequence_buffer.num_tokens_no_spec[buf_indices], new_len
                     )
             total_sync_time += time.time() - update_start
 

@@ -570,11 +570,7 @@ class ExecutionManager:
             _tree_hash_diff(model_hash_baseline, model_hash)
 
         start_exec = time.time()
-        model_outputs = jax.block_until_ready(model_fn(self.graphstate, self.graphother, inputs))
-        exec_took = time.time() - start_exec
-
-        self.kv_pages = model_outputs.kv_pages
-
+        model_outputs = model_fn(self.graphstate, self.graphother, inputs)
         sampler_inputs = (
             batch_metadata,
             req_num_tokens_full,
@@ -589,8 +585,16 @@ class ExecutionManager:
             _tree_hash_diff(sampler_hash_baseline, sampler_hash)
 
         start_sample = time.time()
-        self.rng_key, out_tokens_full, valid_mask_full = jax.block_until_ready(sampler_fn(*sampler_inputs))
-        sample_took = time.time() - start_sample
+        self.rng_key, out_tokens_full, valid_mask_full = sampler_fn(*sampler_inputs)
+        # Single sync to cover model + sampler
+        self.rng_key, out_tokens_full, valid_mask_full, model_outputs = jax.block_until_ready(
+            (self.rng_key, out_tokens_full, valid_mask_full, model_outputs)
+        )
+        total_exec = time.time() - start_exec
+        exec_took = total_exec
+        sample_took = 0.0
+
+        self.kv_pages = model_outputs.kv_pages
         buckets_processed = batch_metadata.input_ids_buf.shape[-1]
         metrics = {
             "exec_time": exec_took,
