@@ -886,13 +886,19 @@ class ExecutionManager:
 
         # Get batched arange: [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         arange = numpy.concatenate([self._arange_cpu[:n] for n in scheduled[:num_requests]])
+        decode_flags = ((scheduled[:num_requests] == 1) & (num_computed_tokens_cpu[:num_requests] > 0)).astype(
+            numpy.int32
+        )
+        decode_flags_rep = decode_flags[req_indices]
 
         # Actual number of tokens being processed (may be less than padded num_tokens_static)
         actual_num_tokens = len(req_indices)
 
         # Compute positions on CPU (use actual size for computation)
         positions_np = self._positions_cpu[:actual_num_tokens]
-        numpy.add(num_computed_tokens_cpu[req_indices], arange, out=positions_np)
+        base_positions = num_computed_tokens_cpu[req_indices] - decode_flags_rep
+        numpy.add(base_positions, arange, out=positions_np)
+        numpy.clip(positions_np, 0, None, out=positions_np)
 
         # Token gathering on CPU
         token_indices = positions_np + req_indices * token_ids_cpu.shape[1]  # max_model_len
@@ -1077,10 +1083,16 @@ class ExecutionManager:
 
         req_indices = numpy.repeat(numpy.arange(num_requests, dtype=numpy.int32), scheduled[:num_requests])
         arange = numpy.concatenate([self._arange_cpu[:n] for n in scheduled[:num_requests]])
+        decode_flags = ((scheduled[:num_requests] == 1) & (num_computed_tokens_cpu[:num_requests] > 0)).astype(
+            numpy.int32
+        )
+        decode_flags_rep = decode_flags[req_indices]
         actual_num_tokens = len(req_indices)
 
         positions_np = self._positions_cpu[:actual_num_tokens]
-        numpy.add(num_computed_tokens_cpu[req_indices], arange, out=positions_np)
+        base_positions = num_computed_tokens_cpu[req_indices] - decode_flags_rep
+        numpy.add(base_positions, arange, out=positions_np)
+        numpy.clip(positions_np, 0, None, out=positions_np)
 
         token_indices = positions_np + req_indices * token_ids_cpu.shape[1]
         numpy.take(token_ids_cpu.ravel(), token_indices, out=self._input_ids_cpu[:actual_num_tokens])
